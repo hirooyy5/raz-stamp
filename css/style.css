@@ -260,7 +260,7 @@ h3 { font-size: 17px; margin: 20px 0 8px; }
   box-shadow: var(--shadow); max-width: calc(100vw - 32px);
 }
 .toast[hidden] { display: none; }
-.toast button { background: none; border: none; color: #90cdf4; font-weight: 800; min-height: 40px; padding: 0 8px; }
+.toast button { white-space: nowrap; flex: none; background: none; border: none; color: #90cdf4; font-weight: 800; min-height: 40px; padding: 0 8px; }
 
 .empty { text-align: center; color: var(--muted); padding: 32px 0; }
 
@@ -271,4 +271,59 @@ h3 { font-size: 17px; margin: 20px 0 8px; }
   .cal-grid { gap: 3px; }
   .cal-day { border-radius: 8px; min-height: 40px; }
   .cal-day .num { font-size: 11px; top: 2px; left: 4px; }
+}
+
+/* ---------- celebration ---------- */
+.celebrate {
+  position: fixed; inset: 0; z-index: 8; /* トースト（元に戻す）より下 */
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+  background: rgba(20, 30, 50, 0.55);
+  animation: fade-in .25s ease-out;
+}
+.celebrate-card {
+  position: relative; z-index: 1;
+  width: min(560px, 100%); max-height: calc(100vh - 32px); overflow-y: auto;
+  background: var(--surface); border-radius: 24px; padding: 28px 24px 24px;
+  text-align: center; box-shadow: 0 16px 50px rgba(0, 0, 0, 0.3);
+  animation: card-in .5s cubic-bezier(.2, 1.4, .4, 1);
+}
+.celebrate-card.is-milestone { border: 4px solid #f6c448; }
+.celebrate-who { margin: 0; font-weight: 700; color: var(--muted); }
+.celebrate-badge {
+  display: inline-block; margin: 8px 0 0; padding: 4px 14px; border-radius: 999px;
+  background: #fff4d6; color: #a66b00; font-weight: 800;
+}
+.celebrate-count { margin: 4px 0 0; color: var(--accent); line-height: 1; }
+.celebrate-count .num { font-size: clamp(72px, 18vw, 120px); font-weight: 900; letter-spacing: -2px; }
+.celebrate-count .unit { font-size: clamp(24px, 5vw, 34px); font-weight: 900; margin-left: 4px; }
+.celebrate-msg { font-size: 19px; font-weight: 700; margin: 12px 0 18px; }
+
+.streak-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; margin-bottom: 18px; }
+.streak-day { display: flex; flex-direction: column; align-items: center; gap: 2px; animation: pop .4s backwards; }
+.streak-day .stamp { --size: 40px; }
+.streak-day small { font-size: 11px; color: var(--muted); }
+.streak-more { font-size: 13px; color: var(--muted); font-weight: 700; }
+
+.celebrate-next .bar { height: 12px; border-radius: 999px; background: var(--bg); overflow: hidden; }
+.celebrate-next .bar span { display: block; height: 100%; border-radius: inherit; background: var(--accent); animation: grow 1s .4s backwards ease-out; }
+.celebrate-next p { margin: 8px 0 0; color: var(--muted); }
+.celebrate-next strong { color: var(--text); font-size: 20px; }
+.celebrate-best { margin: 14px 0 0; font-weight: 800; color: #a66b00; }
+.celebrate-ok { margin-top: 20px; min-width: 200px; font-size: 18px; }
+
+.confetti { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.confetti i {
+  position: absolute; top: -20px; width: 10px; height: 16px; border-radius: 2px;
+  animation: fall linear forwards;
+}
+
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes card-in { from { transform: scale(.6); opacity: 0; } }
+@keyframes grow { from { width: 0; } }
+@keyframes fall {
+  to { transform: translate(var(--drift), 105vh) rotate(var(--spin)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .confetti { display: none; }
+  .celebrate, .celebrate-card, .streak-day, .celebrate-next .bar span { animation: none; }
 }

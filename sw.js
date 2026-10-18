@@ -1,6 +1,6 @@
 // オフライン用 Service Worker。アプリ本体のファイルをキャッシュして、ネットがなくても起動できるようにする。
 // ファイルを更新したら CACHE の番号を上げること。
-const CACHE = 'raz-stamp-v2';
+const CACHE = 'raz-stamp-v3';
 const ASSETS = [
   './',
   'index.html',

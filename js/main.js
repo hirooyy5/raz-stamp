@@ -3,6 +3,7 @@ import {
   toDateKey, canStamp, formatDateJa, formatTimeJa, parseDateKey,
   calcCurrentStreak, calcBestStreak, monthGrid, monthStats, shiftMonth,
   parseBackup, planImport, BACKUP_APP_ID, BACKUP_VERSION,
+  addDays, isMilestone, nextMilestone, streakMessage,
 } from './domain.js';
 import { STAMP_DESIGNS, DEFAULT_STAMP, getDesign, stampSvg } from './stamps.js';
 
@@ -125,6 +126,7 @@ async function stamp(dateKey, memo = '', stampType = state.selectedType) {
     memo: memo.trim().slice(0, 200),
     stampType,
   };
+  const before = [...state.stamps.keys()];
   const ok = await db.addStamp(record);
   if (!ok) {
     showToast('この日はもう押してあります');
@@ -132,6 +134,12 @@ async function stamp(dateKey, memo = '', stampType = state.selectedType) {
   }
   state.stamps.set(dateKey, record);
   render({ popDate: dateKey });
+  const after = [...state.stamps.keys()];
+  const streak = calcCurrentStreak(after, today());
+  // 今回の押印で連続が伸びた（2日以上）ときだけ祝福する。あとから押印して連続がつながった場合も含む
+  if (streak >= 2 && streak > calcCurrentStreak(before, today())) {
+    setTimeout(() => celebrate(profile, streak, calcBestStreak(before)), 500);
+  }
   showToast(`${formatDateJa(dateKey)} に「${getDesign(stampType)?.name ?? 'スタンプ'}」を押しました`, {
     label: '元に戻す',
     onClick: () => removeStamp(dateKey, { silent: true }),
@@ -140,6 +148,7 @@ async function stamp(dateKey, memo = '', stampType = state.selectedType) {
 }
 
 async function removeStamp(dateKey, { silent = false } = {}) {
+  closeCelebration();
   await db.deleteStamp(state.activeId, dateKey);
   state.stamps.delete(dateKey);
   render();
@@ -381,6 +390,65 @@ function renderSettings() {
     );
   });
 }
+
+// ============================================================
+// 連続記録の祝福画面
+// ============================================================
+const CONFETTI_COLORS = ['#e4572e', '#2b6cb0', '#d53f8c', '#805ad5', '#c27c0e', '#2c9a6a', '#f6c448'];
+const STREAK_ROW_MAX = 14;
+
+function celebrate(profile, streak, prevBest) {
+  closeCelebration();
+  const t = today();
+  const end = state.stamps.has(t) ? t : addDays(t, -1);
+  const shown = Math.min(streak, STREAK_ROW_MAX);
+  const days = Array.from({ length: shown }, (_, i) => addDays(end, i - shown + 1));
+  const next = nextMilestone(streak);
+  const progress = Math.round((streak / next) * 100);
+  const newBest = streak > prevBest && prevBest > 0;
+  const milestone = isMilestone(streak);
+
+  const overlay = h('div', { class: 'celebrate', id: 'celebrate', role: 'dialog', 'aria-modal': 'true', 'aria-label': `${streak}日連続` },
+    h('div', { class: 'confetti', 'aria-hidden': 'true' },
+      Array.from({ length: milestone ? 90 : 50 }, (_, i) => h('i', {
+        style: {
+          left: `${Math.random() * 100}%`,
+          background: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+          'animation-delay': `${Math.random() * 0.8}s`,
+          'animation-duration': `${2.2 + Math.random() * 1.8}s`,
+          '--drift': `${Math.round(Math.random() * 160 - 80)}px`,
+          '--spin': `${Math.round(Math.random() * 720 - 360)}deg`,
+        },
+      }))),
+    h('div', { class: `celebrate-card ${milestone ? 'is-milestone' : ''}` },
+      h('p', { class: 'celebrate-who' }, `${profile.name} さん`),
+      milestone && h('p', { class: 'celebrate-badge' }, `🏅 ${streak}日 達成！`),
+      h('p', { class: 'celebrate-count' }, h('span', { class: 'num' }, streak), h('span', { class: 'unit' }, '日連続！')),
+      h('p', { class: 'celebrate-msg' }, streakMessage(streak)),
+      h('div', { class: 'streak-row', 'aria-label': `直近${shown}日の記録` },
+        streak > STREAK_ROW_MAX && h('span', { class: 'streak-more' }, `…+${streak - STREAK_ROW_MAX}`),
+        days.map((d, i) => h('span', { class: 'streak-day', style: { 'animation-delay': `${0.3 + i * 0.07}s` } },
+          stampEl(profile, state.stamps.get(d) ?? { date: d }),
+          h('small', {}, `${parseDateKey(d).getMonth() + 1}/${parseDateKey(d).getDate()}`))),
+      ),
+      h('div', { class: 'celebrate-next' },
+        h('div', { class: 'bar' }, h('span', { style: { width: `${progress}%` } })),
+        h('p', {}, `次の目標 ${next}日まで あと `, h('strong', {}, next - streak), ' 日'),
+      ),
+      newBest && h('p', { class: 'celebrate-best' }, `👑 自己ベスト更新！（これまでの最高 ${prevBest}日）`),
+      h('button', { class: 'btn btn-primary celebrate-ok', onclick: closeCelebration }, 'やったね！'),
+    ),
+  );
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeCelebration(); });
+  document.body.append(overlay);
+  overlay.querySelector('.celebrate-ok').focus();
+}
+
+function closeCelebration() {
+  document.getElementById('celebrate')?.remove();
+}
+
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeCelebration(); });
 
 // ============================================================
 // ダイアログ

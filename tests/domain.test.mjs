@@ -110,3 +110,22 @@ test('planImport は既存データを優先する', () => {
   assert.deepEqual(plan.profiles.map((p) => p.id), ['p2']);
   assert.deepEqual(plan.stamps.map((s) => s.date), ['2026-10-17']);
 });
+
+test('nextMilestone は次の節目を返す', async () => {
+  const { nextMilestone, isMilestone } = await import('../js/domain.js');
+  assert.equal(nextMilestone(2), 3);
+  assert.equal(nextMilestone(3), 7);
+  assert.equal(nextMilestone(365), 400);
+  assert.equal(nextMilestone(420), 500);
+  assert.ok(isMilestone(7));
+  assert.ok(!isMilestone(8));
+  assert.ok(isMilestone(500));
+});
+
+test('streakMessage は日数に応じて変わる', async () => {
+  const { streakMessage } = await import('../js/domain.js');
+  assert.match(streakMessage(2), /いい調子/);
+  assert.match(streakMessage(3), /3日坊主/);
+  assert.match(streakMessage(10), /1週間/);
+  assert.match(streakMessage(30), /1か月/);
+});

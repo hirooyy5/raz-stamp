@@ -73,6 +73,27 @@ export function calcBestStreak(dateKeys) {
   return best;
 }
 
+/** 祝福画面で「次の目標」として見せる連続日数の節目 */
+export const STREAK_MILESTONES = [3, 7, 14, 21, 30, 50, 100, 150, 200, 365];
+
+export function isMilestone(n) {
+  return STREAK_MILESTONES.includes(n) || (n > 365 && n % 100 === 0);
+}
+
+export function nextMilestone(n) {
+  return STREAK_MILESTONES.find((m) => m > n) ?? (Math.floor(n / 100) + 1) * 100;
+}
+
+export function streakMessage(n) {
+  if (n >= 365) return '1年連続！ 本当に本当にすごい！';
+  if (n >= 100) return '100日以上連続！ 英語が毎日の習慣になったね！';
+  if (n >= 30) return '1か月以上連続！ 英語の力がしっかり身についてきてる！';
+  if (n >= 14) return '2週間以上連続！ もう立派な習慣だね！';
+  if (n >= 7) return '1週間以上連続！ すごい！';
+  if (n >= 3) return '3日坊主クリア！ この調子で続けよう！';
+  return 'いい調子！ 明日も続けよう！';
+}
+
 /** 日曜始まりの月カレンダー。前後の空きマスは null */
 export function monthGrid(year, month) {
   const first = new Date(year, month - 1, 1);
