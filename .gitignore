@@ -1,0 +1,15 @@
+# secrets
+.env
+.env.*
+*.env
+.envrc
+*.key
+*.pem
+credentials*.json
+
+# OS / editor
+.DS_Store
+node_modules/
+
+# backups exported from the app (may contain children's names)
+raz-stamp-backup-*.json

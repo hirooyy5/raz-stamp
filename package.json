@@ -1,0 +1,12 @@
+{
+  "name": "raz-stamp",
+  "version": "1.0.0",
+  "description": "Raz-Kids などの毎日の英語学習を記録するスタンプカレンダー（PWA）",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test tests/",
+    "start": "python3 -m http.server 8080"
+  }
+}
