@@ -98,3 +98,42 @@ export function stampSvg(id) {
     </svg>`;
   return tpl.content.firstElementChild;
 }
+
+// ---- おくすり（連続記録の救済アイテム）----
+
+/** カプセルの絵（中心 32,32・64 四方）。左右2色＋ハイライト */
+const CAPSULE = `
+  <g transform="rotate(-40 32 32)">
+    <path d="M18 22 H32 V42 H18 a10 10 0 0 1 0 -20 Z" fill="#ec5f8a"/>
+    <path d="M32 22 H46 a10 10 0 0 1 0 20 H32 Z" fill="#ffffff"/>
+    <rect x="8" y="22" width="48" height="20" rx="10" fill="none" stroke="#8a2448" stroke-width="2.6"/>
+    <path d="M32 22 V42" stroke="#8a2448" stroke-width="2.2"/>
+    <path d="M14 27.5 H27" stroke="#fff" stroke-opacity=".75" stroke-width="3" stroke-linecap="round"/>
+    <path d="M37 27.5 H50" stroke="#f3c6d5" stroke-width="3" stroke-linecap="round"/>
+  </g>`;
+
+export const RESCUE_COLOR = '#2c9a6a';
+
+function svgFrom(markup) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = markup.trim();
+  return tpl.content.firstElementChild;
+}
+
+/** もちもの欄などで使うカプセル単体のアイコン */
+export function capsuleSvg(label = 'おくすり') {
+  return svgFrom(`<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${label}">${CAPSULE}</svg>`);
+}
+
+/** カレンダーなどに表示する「おくすりで救済した日」のスタンプ */
+export function rescueStampSvg() {
+  return svgFrom(`
+    <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="おくすりで救済">
+      <circle cx="50" cy="50" r="46" fill="#fff" fill-opacity=".85"/>
+      <circle cx="50" cy="50" r="46" fill="currentColor" fill-opacity=".06" stroke="currentColor" stroke-width="4" stroke-dasharray="7 4"/>
+      <g transform="translate(22 12) scale(.875)">${CAPSULE}</g>
+      <rect x="15" y="64" width="70" height="16" rx="4" fill="currentColor"/>
+      <text x="50" y="75.8" text-anchor="middle" font-size="11" font-weight="900" fill="#fff"
+        font-family="system-ui, -apple-system, sans-serif" letter-spacing=".4">SAFE!</text>
+    </svg>`);
+}

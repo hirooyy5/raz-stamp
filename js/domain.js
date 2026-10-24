@@ -1,7 +1,7 @@
 // 日付・スタンプ集計などの純粋ロジック（DOM や IndexedDB に依存しない）
 
 export const BACKUP_APP_ID = 'raz-stamp';
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2; // v2: アイテム（おくすり）の記録を追加
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
@@ -30,9 +30,12 @@ export function addDays(key, n) {
   return toDateKey(d);
 }
 
-/** 押印できるのは今日以前の日付のみ */
+/** あとから押印できるのは過去何日までか（自由に埋められるとおくすりの意味がなくなるため制限する） */
+export const BACKFILL_DAYS = 3;
+
+/** 押印できるのは今日と、過去 BACKFILL_DAYS 日以内 */
 export function canStamp(key, todayKey) {
-  return isValidDateKey(key) && key <= todayKey;
+  return isValidDateKey(key) && key <= todayKey && key >= addDays(todayKey, -BACKFILL_DAYS);
 }
 
 export function formatDateJa(key) {
@@ -94,6 +97,66 @@ export function streakMessage(n) {
   return 'いい調子！ 明日も続けよう！';
 }
 
+// ---- アイテム（おくすり）----
+// おくすり: 連続記録が1日だけ途切れたとき、その日を救済して連続をつなぐアイテム
+
+/** 連続日数がこの倍数に達するたびに1個もらえる */
+export const ITEM_EVERY = 5;
+/** 持てる上限 */
+export const ITEM_MAX = 2;
+/** 空いた日から何日後まで使えるか（2 = 翌々日まで） */
+export const RESCUE_DEADLINE_DAYS = 2;
+
+export const isRescue = (record) => record?.kind === 'rescue';
+
+/** 台帳（grant / use）から今の所持数を計算する */
+export function itemCount(events) {
+  let n = 0;
+  for (const e of events) n += e.type === 'grant' ? 1 : e.type === 'use' ? -1 : 0;
+  return Math.max(0, Math.min(ITEM_MAX, n));
+}
+
+/** 連続日数が before → after に伸びたときに通過した ITEM_EVERY の倍数 */
+export function milestonesCrossed(before, after) {
+  const out = [];
+  for (let m = (Math.floor(before / ITEM_EVERY) + 1) * ITEM_EVERY; m <= after; m += ITEM_EVERY) out.push(m);
+  return out;
+}
+
+/** 次のおくすりまであと何日か */
+export function daysToNextItem(streak) {
+  return ITEM_EVERY - (streak % ITEM_EVERY);
+}
+
+/**
+ * その日におくすりを使えるか。stamps は date → record の Map。
+ * 使えるのは「前の日が学習スタンプ」で「1日だけ空いている」日を、期限内に救済する場合のみ。
+ */
+export function rescueCheck(dateKey, todayKey, stamps, count) {
+  if (stamps.has(dateKey)) return { ok: false, reason: 'この日はもうスタンプがあります' };
+  if (dateKey >= todayKey) return { ok: false, reason: '今日より前の日にだけ使えます' };
+  if (dateKey < addDays(todayKey, -RESCUE_DEADLINE_DAYS)) {
+    return { ok: false, reason: '使える期限（空いた日の翌々日まで）が過ぎています' };
+  }
+  const prev = stamps.get(addDays(dateKey, -1));
+  if (!prev) return { ok: false, reason: '前の日もスタンプがないので、つなげる連続記録がありません' };
+  const nextKey = addDays(dateKey, 1);
+  const next = stamps.get(nextKey);
+  if (isRescue(prev) || isRescue(next)) return { ok: false, reason: 'おくすりは2日続けて使えません' };
+  if (!next && nextKey !== todayKey) return { ok: false, reason: '2日以上空いているので使えません' };
+  if (count <= 0) return { ok: false, reason: 'おくすりを持っていません' };
+  return { ok: true, reason: '' };
+}
+
+/** ホーム画面でお知らせする救済候補の日（新しい日を優先）。なければ null */
+export function rescueCandidate(todayKey, stamps, count) {
+  for (let i = 1; i <= RESCUE_DEADLINE_DAYS; i++) {
+    const key = addDays(todayKey, -i);
+    if (rescueCheck(key, todayKey, stamps, count).ok) return key;
+  }
+  return null;
+}
+
 /** 日曜始まりの月カレンダー。前後の空きマスは null */
 export function monthGrid(year, month) {
   const first = new Date(year, month - 1, 1);
@@ -128,7 +191,7 @@ export function shiftMonth(year, month, delta) {
 /** バックアップ JSON を検証し、正規化したデータを返す。不正なら Error を投げる */
 export function parseBackup(obj) {
   if (!obj || obj.app !== BACKUP_APP_ID) throw new Error('このアプリのバックアップファイルではありません');
-  if (obj.version !== BACKUP_VERSION) throw new Error(`未対応のバージョンです（version: ${obj.version}）`);
+  if (obj.version !== 1 && obj.version !== BACKUP_VERSION) throw new Error(`未対応のバージョンです（version: ${obj.version}）`);
   if (!Array.isArray(obj.profiles) || !Array.isArray(obj.stamps)) throw new Error('ファイルの形式が正しくありません');
 
   const profiles = obj.profiles.map((p) => {
@@ -150,17 +213,28 @@ export function parseBackup(obj) {
       backfilled: Boolean(s.backfilled),
       memo: typeof s.memo === 'string' ? s.memo.slice(0, 200) : '',
       stampType: typeof s.stampType === 'string' ? s.stampType.slice(0, 32) : null,
+      kind: s.kind === 'rescue' ? 'rescue' : 'study',
     };
   });
-  return { profiles, stamps };
+
+  const itemEvents = (Array.isArray(obj.itemEvents) ? obj.itemEvents : []).map((e) => {
+    if (!e || typeof e.id !== 'string' || !ids.has(e.profileId) || !['grant', 'use'].includes(e.type)
+      || !isValidDateKey(e.date) || Number.isNaN(Date.parse(e.at))) {
+      throw new Error('アイテムのデータが正しくありません');
+    }
+    return { id: e.id, profileId: e.profileId, type: e.type, date: e.date, at: e.at, milestone: Number(e.milestone) || null };
+  });
+  return { profiles, stamps, itemEvents };
 }
 
 /** インポートの差分を計算する。同じプロフィール ID・同じ日付は既存データを優先する */
-export function planImport(existingProfiles, existingStamps, incoming) {
+export function planImport(existingProfiles, existingStamps, incoming, existingEvents = []) {
   const profileIds = new Set(existingProfiles.map((p) => p.id));
   const stampKeys = new Set(existingStamps.map((s) => `${s.profileId}|${s.date}`));
+  const eventIds = new Set(existingEvents.map((e) => e.id));
   return {
     profiles: incoming.profiles.filter((p) => !profileIds.has(p.id)),
     stamps: incoming.stamps.filter((s) => !stampKeys.has(`${s.profileId}|${s.date}`)),
+    itemEvents: (incoming.itemEvents ?? []).filter((e) => !eventIds.has(e.id)),
   };
 }

@@ -4,8 +4,12 @@ import {
   calcCurrentStreak, calcBestStreak, monthGrid, monthStats, shiftMonth,
   parseBackup, planImport, BACKUP_APP_ID, BACKUP_VERSION,
   addDays, isMilestone, nextMilestone, streakMessage,
+  isRescue, itemCount, milestonesCrossed, daysToNextItem, rescueCheck, rescueCandidate,
+  ITEM_MAX, ITEM_EVERY, BACKFILL_DAYS,
 } from './domain.js';
-import { STAMP_DESIGNS, DEFAULT_STAMP, getDesign, stampSvg } from './stamps.js';
+import {
+  STAMP_DESIGNS, DEFAULT_STAMP, getDesign, stampSvg, capsuleSvg, rescueStampSvg, RESCUE_COLOR,
+} from './stamps.js';
 
 const RAZ_KIDS_URL = 'https://www.raz-kids.com/';
 const EMOJIS = ['⭐', '🌸', '🚀', '🐱', '🐶', '🏆', '⚽', '🎵', '📚', '🌈', '🍀', '🔥'];
@@ -19,11 +23,19 @@ const state = {
   view: null,        // { year, month }
   tab: 'home',
   selectedType: DEFAULT_STAMP, // 選択中プロフィールが次に押すスタンプ
+  itemEvents: [],    // 全員分のおくすり台帳
+  rescueDismissed: null, // 「使わない」を選んだ救済候補の日
 };
 
 const $ = (sel) => document.querySelector(sel);
 const today = () => toDateKey(new Date());
 const activeProfile = () => state.profiles.find((p) => p.id === state.activeId);
+const itemsOf = (profileId) => itemCount(state.itemEvents.filter((e) => e.profileId === profileId));
+/** 連続日数用: 救済した日も含む全スタンプの日付 */
+const allKeys = () => [...state.stamps.keys()];
+/** 達成日数用: 学習した日だけ */
+const studyKeys = () => [...state.stamps.values()].filter((r) => !isRescue(r)).map((r) => r.date);
+const shortDate = (key) => `${parseDateKey(key).getMonth() + 1}/${parseDateKey(key).getDate()}`;
 
 /** 小さな要素生成ヘルパー。文字列は textContent として入るので名前やメモが HTML として解釈されない */
 function h(tag, props = {}, ...children) {
@@ -52,6 +64,13 @@ function rotationFor(dateKey) {
 
 /** 押したスタンプの表示。デザイン指定のない古い記録はプロフィールの絵文字で表示する */
 function stampEl(profile, record, extraClass = '') {
+  if (isRescue(record)) {
+    return h('span', {
+      class: `stamp design rescue ${extraClass}`.trim(),
+      style: { '--ink': RESCUE_COLOR, '--rot': rotationFor(record.date) },
+      title: 'おくすりで救済',
+    }, rescueStampSvg());
+  }
   const design = getDesign(record.stampType);
   if (design) {
     return h('span', {
@@ -83,6 +102,37 @@ function stampPicker(selected, onChange) {
   return wrap;
 }
 
+/** おくすりのスロット（上限ぶん並べ、持っている数だけカプセルを入れる） */
+function itemSlots(count) {
+  return h('div', { class: 'slots', 'aria-label': `おくすり ${count} / ${ITEM_MAX}` },
+    Array.from({ length: ITEM_MAX }, (_, i) =>
+      h('span', { class: `slot ${i < count ? 'filled' : ''}` }, i < count && capsuleSvg())));
+}
+
+/** 今日カードの「もちもの」欄 */
+function itemShelf(profile, streak) {
+  const n = itemsOf(profile.id);
+  const left = daysToNextItem(streak);
+  const done = ITEM_EVERY - left;
+  return h('section', { class: 'items', 'aria-label': 'もちもの' },
+    h('div', { class: 'items-head' },
+      h('span', { class: 'items-title' }, 'もちもの'),
+      h('span', { class: 'muted small' }, `おくすり ${n} / ${ITEM_MAX}`)),
+    h('div', { class: 'items-body' },
+      itemSlots(n),
+      h('div', { class: 'items-next' },
+        n >= ITEM_MAX
+          ? h('p', {}, 'いっぱい！ 使うと また もらえるよ')
+          : [
+              h('div', { class: 'segbar', 'aria-hidden': 'true' },
+                Array.from({ length: ITEM_EVERY }, (_, i) => h('span', { class: i < done ? 'on' : '' }))),
+              h('p', {}, '次のおくすりまで あと ', h('strong', {}, left), ' 日'),
+            ]),
+    ),
+    h('p', { class: 'items-help' }, `${ITEM_EVERY}日連続ごとに1個もらえる。1日だけ空いた日を救済して連続記録を守れるよ（翌々日まで）`),
+  );
+}
+
 // ============================================================
 // データ読み込み
 // ============================================================
@@ -94,10 +144,15 @@ async function loadProfiles() {
 
 async function loadStamps() {
   state.stamps = new Map();
-  if (!state.activeId) return;
+  if (!state.activeId) {
+    state.itemEvents = await db.listAllItemEvents();
+    return;
+  }
   for (const s of await db.listStamps(state.activeId)) state.stamps.set(s.date, s);
   const saved = await db.getSetting(`stampType:${state.activeId}`);
   state.selectedType = getDesign(saved) ? saved : DEFAULT_STAMP;
+  state.rescueDismissed = await db.getSetting(`rescueDismissed:${state.activeId}`) ?? null;
+  state.itemEvents = await db.listAllItemEvents();
 }
 
 async function selectStampType(id) {
@@ -126,7 +181,7 @@ async function stamp(dateKey, memo = '', stampType = state.selectedType) {
     memo: memo.trim().slice(0, 200),
     stampType,
   };
-  const before = [...state.stamps.keys()];
+  const before = allKeys();
   const ok = await db.addStamp(record);
   if (!ok) {
     showToast('この日はもう押してあります');
@@ -134,11 +189,14 @@ async function stamp(dateKey, memo = '', stampType = state.selectedType) {
   }
   state.stamps.set(dateKey, record);
   render({ popDate: dateKey });
-  const after = [...state.stamps.keys()];
-  const streak = calcCurrentStreak(after, today());
+  const beforeStreak = calcCurrentStreak(before, today());
+  const streak = calcCurrentStreak(allKeys(), today());
+  // 学習スタンプで連続が 5 の倍数に達したらおくすりを付与（救済では付与しない）
+  const grant = await grantItems(profile, dateKey, milestonesCrossed(beforeStreak, streak));
+  if (grant.granted) render();
   // 今回の押印で連続が伸びた（2日以上）ときだけ祝福する。あとから押印して連続がつながった場合も含む
-  if (streak >= 2 && streak > calcCurrentStreak(before, today())) {
-    setTimeout(() => celebrate(profile, streak, calcBestStreak(before)), 500);
+  if (streak >= 2 && streak > beforeStreak) {
+    setTimeout(() => celebrate(profile, streak, calcBestStreak(before), grant), 500);
   }
   showToast(`${formatDateJa(dateKey)} に「${getDesign(stampType)?.name ?? 'スタンプ'}」を押しました`, {
     label: '元に戻す',
@@ -147,12 +205,79 @@ async function stamp(dateKey, memo = '', stampType = state.selectedType) {
   return true;
 }
 
+async function grantItems(profile, dateKey, milestones) {
+  let have = itemsOf(profile.id);
+  const events = [];
+  let full = false;
+  for (const m of milestones) {
+    if (have >= ITEM_MAX) {
+      full = true;
+      continue;
+    }
+    events.push({ id: crypto.randomUUID(), profileId: profile.id, type: 'grant', date: dateKey, at: new Date().toISOString(), milestone: m });
+    have++;
+  }
+  if (events.length) {
+    await db.addItemEvents(events);
+    state.itemEvents.push(...events);
+  }
+  return { granted: events.length, full, milestones };
+}
+
 async function removeStamp(dateKey, { silent = false } = {}) {
   closeCelebration();
+  const record = state.stamps.get(dateKey);
   await db.deleteStamp(state.activeId, dateKey);
   state.stamps.delete(dateKey);
+
+  // 救済を取り消したらおくすりを戻す。学習スタンプを取り消したら、その日にもらったおくすりを（未使用の分だけ）回収する
+  const mine = state.itemEvents.filter((e) => e.profileId === state.activeId && e.date === dateKey);
+  let revoke = [];
+  if (isRescue(record)) {
+    revoke = mine.filter((e) => e.type === 'use');
+  } else {
+    const grants = mine.filter((e) => e.type === 'grant');
+    revoke = grants.slice(0, Math.min(grants.length, itemsOf(state.activeId)));
+  }
+  if (revoke.length) {
+    const ids = revoke.map((e) => e.id);
+    await db.deleteItemEvents(ids);
+    state.itemEvents = state.itemEvents.filter((e) => !ids.includes(e.id));
+  }
   render();
-  if (!silent) showToast('スタンプを取り消しました');
+  if (!silent) showToast(isRescue(record) ? '救済を取り消しました。おくすりは戻りました' : 'スタンプを取り消しました');
+}
+
+/** おくすりを使って、1日だけ空いた日を救済する */
+async function rescue(dateKey) {
+  const profile = activeProfile();
+  const t = today();
+  const check = rescueCheck(dateKey, t, state.stamps, itemsOf(profile.id));
+  if (!check.ok) {
+    showToast(check.reason);
+    return;
+  }
+  const now = new Date().toISOString();
+  const record = { profileId: profile.id, date: dateKey, stampedAt: now, backfilled: true, memo: '', stampType: null, kind: 'rescue' };
+  const use = { id: crypto.randomUUID(), profileId: profile.id, type: 'use', date: dateKey, at: now };
+  if (!(await db.addRescue(record, use))) {
+    showToast('この日はもうスタンプがあります');
+    return;
+  }
+  state.stamps.set(dateKey, record);
+  state.itemEvents.push(use);
+  render({ popDate: dateKey });
+  const streak = calcCurrentStreak(allKeys(), t);
+  showToast(`おくすりで ${shortDate(dateKey)} を救済！ ${streak}日連続がつながりました`, {
+    label: '元に戻す',
+    onClick: () => removeStamp(dateKey, { silent: true }),
+  });
+}
+
+async function dismissRescue(dateKey) {
+  state.rescueDismissed = dateKey;
+  await db.setSetting(`rescueDismissed:${state.activeId}`, dateKey);
+  renderToday();
 }
 
 async function saveStampDetails(dateKey, { memo, stampType }) {
@@ -188,7 +313,11 @@ function renderProfiles() {
         style: { '--c': p.color },
         'aria-pressed': String(p.id === state.activeId),
         onclick: () => p.id !== state.activeId && switchProfile(p.id),
-      }, h('span', { 'aria-hidden': 'true' }, p.emoji), p.name),
+      },
+        h('span', { 'aria-hidden': 'true' }, p.emoji), p.name,
+        itemsOf(p.id) > 0 && h('span', { class: 'chip-items', title: `おくすり ${itemsOf(p.id)}個` },
+          capsuleSvg(), itemsOf(p.id)),
+      ),
     ),
     h('button', { class: 'chip chip-add', onclick: () => openProfileDialog() }, '＋ 追加'),
   );
@@ -203,8 +332,19 @@ function renderToday({ popDate } = {}) {
   }
   const t = today();
   const record = state.stamps.get(t);
-  const keys = [...state.stamps.keys()];
-  const { count, elapsed } = monthStats(keys, ...t.split('-').slice(0, 2).map(Number), t);
+  const keys = allKeys();
+  const streak = calcCurrentStreak(keys, t);
+  const { count, elapsed } = monthStats(studyKeys(), ...t.split('-').slice(0, 2).map(Number), t);
+  const candidate = rescueCandidate(t, state.stamps, itemsOf(profile.id));
+  const banner = candidate && candidate !== state.rescueDismissed && h('div', { class: 'rescue-banner', role: 'alert' },
+    h('span', { class: 'rb-icon', 'aria-hidden': 'true' }, capsuleSvg()),
+    h('div', { class: 'rb-body' },
+      h('strong', {}, `${formatDateJa(candidate)} のスタンプがありません`),
+      h('p', {}, `おくすりを使うと、${calcCurrentStreak([...keys, candidate], t)}日連続がつながります`)),
+    h('div', { class: 'btn-row' },
+      h('button', { class: 'btn btn-rescue', onclick: () => rescue(candidate) }, 'おくすりを使う'),
+      h('button', { class: 'btn', onclick: () => dismissRescue(candidate) }, '使わない')),
+  );
 
   const main = record
     ? h('div', { class: 'today-done' },
@@ -230,12 +370,14 @@ function renderToday({ popDate } = {}) {
   box.replaceChildren(
     h('p', { class: 'today-who' }, `${profile.name} さんの今日の学習`),
     h('p', { class: 'today-date' }, formatDateJa(t)),
+    ...(banner ? [banner] : []), // replaceChildren は null を文字列にしてしまうため
     main,
     h('div', { class: 'stats' },
-      statEl(calcCurrentStreak(keys, t), '日', '連続'),
+      statEl(streak, '日', '連続'),
       statEl(count, `/${elapsed}日`, '今月'),
       statEl(calcBestStreak(keys), '日', '最高連続'),
     ),
+    itemShelf(profile, streak),
     h('a', { class: 'btn btn-block', href: RAZ_KIDS_URL, target: '_blank', rel: 'noopener noreferrer' }, '📖 Raz-Kids を開く'),
   );
 }
@@ -256,7 +398,7 @@ function renderCalendar({ popDate } = {}) {
   }
   const t = today();
   const { year, month } = state.view;
-  const { count, elapsed, daysInMonth } = monthStats([...state.stamps.keys()], year, month, t);
+  const { count, elapsed, daysInMonth } = monthStats(studyKeys(), year, month, t);
   const isCurrentMonth = t.startsWith(`${year}-${String(month).padStart(2, '0')}`);
 
   const go = (delta) => {
@@ -275,11 +417,11 @@ function renderCalendar({ popDate } = {}) {
     const day = parseDateKey(key).getDate();
     const cls = ['cal-day', dow === 0 && 'sun', dow === 6 && 'sat', key === t && 'is-today', future && 'is-future']
       .filter(Boolean).join(' ');
-    const label = `${month}月${day}日 ${record ? 'スタンプあり' : future ? '' : 'スタンプなし'}`;
+    const label = `${month}月${day}日 ${isRescue(record) ? 'おくすりで救済' : record ? 'スタンプあり' : future ? '' : 'スタンプなし'}`;
     return h('button', { class: cls, disabled: future, 'aria-label': label, onclick: () => openDayDialog(key) },
       h('span', { class: 'num' }, day),
       record && stampEl(profile, record, popDate === key ? 'pop' : ''),
-      record?.backfilled && h('span', { class: 'backfill-mark', title: 'あとから押印' }, '後'),
+      record?.backfilled && !isRescue(record) && h('span', { class: 'backfill-mark', title: 'あとから押印' }, '後'),
     );
   });
 
@@ -302,7 +444,8 @@ function renderCalendar({ popDate } = {}) {
     h('div', { class: 'legend' },
       h('span', {}, '🟧 枠 = 今日'),
       h('span', {}, '「後」= あとから押したスタンプ'),
-      h('span', {}, '日付をタップすると押し忘れの記録・取り消しができます'),
+      h('span', {}, '点線の SAFE! = おくすりで救済した日（達成日数には数えません）'),
+      h('span', {}, `日付をタップすると、押し忘れの記録（${BACKFILL_DAYS}日前まで）やおくすりの使用ができます`),
     ),
   );
 }
@@ -325,24 +468,40 @@ function renderHistory() {
     if (!byMonth.has(ym)) byMonth.set(ym, []);
     byMonth.get(ym).push(r);
   }
+  const ledger = state.itemEvents.filter((e) => e.profileId === profile.id).sort((a, b) => b.at.localeCompare(a.at));
   box.replaceChildren(
-    h('h2', {}, `${profile.name} さんの押印履歴（全 ${records.length} 日）`),
+    h('h2', {}, `${profile.name} さんの押印履歴（学習 ${studyKeys().length} 日）`),
     ...[...byMonth].map(([ym, list]) => {
       const [y, m] = ym.split('-').map(Number);
       return h('section', { class: 'hist-month' },
-        h('h3', {}, h('span', {}, `${y}年 ${m}月`), h('span', { class: 'muted' }, `${list.length} 日`)),
+        h('h3', {}, h('span', {}, `${y}年 ${m}月`), h('span', { class: 'muted' },
+          `学習 ${list.filter((r) => !isRescue(r)).length} 日`,
+          list.some(isRescue) && ` ／ 救済 ${list.filter(isRescue).length} 日`)),
         h('ul', { class: 'hist-list' }, list.map((r) =>
           h('li', {}, h('button', { class: 'hist-item', onclick: () => openDayDialog(r.date) },
             stampEl(profile, r),
             h('div', { class: 'hist-main' },
-              h('div', { class: 'hist-date' }, formatDateJa(r.date), r.backfilled && h('span', { class: 'tag' }, 'あとから押印')),
-              h('div', { class: 'hist-meta' }, `押した日時: ${formatStampedAt(r.stampedAt)}`),
+              h('div', { class: 'hist-date' }, formatDateJa(r.date),
+                isRescue(r) ? h('span', { class: 'tag tag-rescue' }, 'おくすりで救済')
+                  : r.backfilled && h('span', { class: 'tag' }, 'あとから押印')),
+              h('div', { class: 'hist-meta' }, `${isRescue(r) ? '使った' : '押した'}日時: ${formatStampedAt(r.stampedAt)}`),
               r.memo && h('div', { class: 'hist-memo' }, `📝 ${r.memo}`),
             ),
           )),
         )),
       );
     }),
+    ...(ledger.length ? [h('section', { class: 'hist-month' },
+      h('h3', {}, h('span', {}, 'おくすりの記録'), h('span', { class: 'muted' }, `いま ${itemsOf(profile.id)} / ${ITEM_MAX} 個`)),
+      h('ul', { class: 'hist-list' }, ledger.map((e) =>
+        h('li', { class: 'hist-item' },
+          h('span', { class: `ledger-icon ${e.type}` }, capsuleSvg()),
+          h('div', { class: 'hist-main' },
+            h('div', { class: 'hist-date' }, e.type === 'grant'
+              ? `＋1 ゲット（${e.milestone ?? ITEM_EVERY}日連続）`
+              : `−1 使用（${formatDateJa(e.date)} を救済）`),
+            h('div', { class: 'hist-meta' }, formatStampedAt(e.at)),
+          )))))] : []),
   );
 }
 
@@ -355,7 +514,7 @@ function renderSettings() {
   const box = $('#settings');
   box.replaceChildren(h('p', { class: 'muted' }, '読み込み中…'));
   db.listAllStamps().then((all) => {
-    all.forEach((s) => counts.set(s.profileId, (counts.get(s.profileId) ?? 0) + 1));
+    all.filter((s) => !isRescue(s)).forEach((s) => counts.set(s.profileId, (counts.get(s.profileId) ?? 0) + 1));
     box.replaceChildren(
       h('section', { class: 'set-section' },
         h('h2', {}, '使う人'),
@@ -397,7 +556,7 @@ function renderSettings() {
 const CONFETTI_COLORS = ['#e4572e', '#2b6cb0', '#d53f8c', '#805ad5', '#c27c0e', '#2c9a6a', '#f6c448'];
 const STREAK_ROW_MAX = 14;
 
-function celebrate(profile, streak, prevBest) {
+function celebrate(profile, streak, prevBest, grant = null) {
   closeCelebration();
   const t = today();
   const end = state.stamps.has(t) ? t : addDays(t, -1);
@@ -436,6 +595,15 @@ function celebrate(profile, streak, prevBest) {
         h('p', {}, `次の目標 ${next}日まで あと `, h('strong', {}, next - streak), ' 日'),
       ),
       newBest && h('p', { class: 'celebrate-best' }, `👑 自己ベスト更新！（これまでの最高 ${prevBest}日）`),
+      grant?.granted > 0 && h('div', { class: 'celebrate-item' },
+        h('span', { class: 'ci-icon', 'aria-hidden': 'true' }, capsuleSvg()),
+        h('div', { class: 'ci-body' },
+          h('strong', {}, `おくすりを ${grant.granted}個 ゲット！`),
+          h('p', {}, '連続記録が1日途切れても守れるよ'),
+          h('div', { class: 'ci-slots' }, h('span', { class: 'muted small' }, 'もちもの'), itemSlots(itemsOf(profile.id)))),
+      ),
+      grant?.full && !grant.granted && h('p', { class: 'celebrate-full' },
+        `${grant.milestones.at(-1)}日連続！ でも もちものがいっぱい（${ITEM_MAX}/${ITEM_MAX}）なので、今回はおくすりをもらえません`),
       h('button', { class: 'btn btn-primary celebrate-ok', onclick: closeCelebration }, 'やったね！'),
     ),
   );
@@ -485,6 +653,31 @@ function openDayDialog(dateKey) {
   const memo = h('textarea', { maxlength: '200', placeholder: '例: Level M「The Lion and the Mouse」を読んだ' });
   memo.value = record?.memo ?? '';
 
+  if (isRescue(record)) {
+    openDialog(
+      h('h2', {}, formatDateJa(dateKey)),
+      h('div', { class: 'center' }, stampEl(profile, record)),
+      h('p', { class: 'center' }, 'おくすりで救済した日です'),
+      h('p', { class: 'muted small center' }, `使った日時: ${formatStampedAt(record.stampedAt)}`),
+      h('div', { class: 'btn-row' },
+        h('button', {
+          class: 'btn btn-danger',
+          onclick: async () => {
+            const ok = await confirmDialog({
+              title: '救済を取り消しますか？',
+              message: `${formatDateJa(dateKey)} の救済を取り消して、おくすりを1個戻します。連続記録はここで途切れます。`,
+              okLabel: '取り消す',
+              danger: true,
+            });
+            if (ok) await removeStamp(dateKey);
+          },
+        }, '救済を取り消す'),
+        h('button', { class: 'btn btn-primary', onclick: closeDialog }, '閉じる'),
+      ),
+    );
+    return;
+  }
+
   if (record) {
     let chosen = record.stampType;
     const preview = h('div', { class: 'center' }, stampEl(profile, record));
@@ -519,23 +712,48 @@ function openDayDialog(dateKey) {
     return;
   }
 
-  if (!canStamp(dateKey, t)) return;
-  const isToday = dateKey === t;
+  if (dateKey > t) return;
   let chosen = state.selectedType;
+  const picker = () => h('div', { class: 'field' }, h('span', {}, 'スタンプを選ぶ'), stampPicker(chosen, (id) => { chosen = id; }));
+  const memoField = () => h('label', { class: 'field' }, h('span', {}, 'メモ（任意）'), memo);
+
+  if (dateKey === t) {
+    openDialog(
+      h('h2', {}, formatDateJa(dateKey)),
+      h('p', {}, '今日の学習を記録しますか？'),
+      picker(),
+      memoField(),
+      h('div', { class: 'btn-row' },
+        h('button', { class: 'btn', onclick: closeDialog }, 'キャンセル'),
+        h('button', { class: 'btn btn-primary', onclick: async () => { closeDialog(); await stamp(dateKey, memo.value, chosen); } }, 'スタンプを押す'),
+      ),
+    );
+    return;
+  }
+
+  // 過去の空いた日: 「あとから押す（学習した）」と「おくすりで守る（学習しなかった）」の2択
+  const n = itemsOf(profile.id);
+  const rc = rescueCheck(dateKey, t, state.stamps, n);
   openDialog(
     h('h2', {}, formatDateJa(dateKey)),
-    h('p', {}, isToday
-      ? '今日の学習を記録しますか？'
-      : 'この日はまだスタンプがありません。学習したのに押し忘れていた場合は、あとから押せます。'),
-    h('div', { class: 'field' }, h('span', {}, 'スタンプを選ぶ'), stampPicker(chosen, (id) => { chosen = id; })),
-    h('label', { class: 'field' }, h('span', {}, 'メモ（任意）'), memo),
-    h('div', { class: 'btn-row' },
-      h('button', { class: 'btn', onclick: closeDialog }, 'キャンセル'),
-      h('button', {
-        class: 'btn btn-primary',
-        onclick: async () => { closeDialog(); await stamp(dateKey, memo.value, chosen); },
-      }, isToday ? 'スタンプを押す' : 'あとから押す'),
+    h('p', {}, 'この日はまだスタンプがありません。'),
+    h('section', { class: 'option' },
+      h('h3', {}, '📖 あとから押す'),
+      h('p', { class: 'muted small' }, '学習したけど、スタンプを押し忘れた日'),
+      canStamp(dateKey, t)
+        ? [picker(), memoField(),
+            h('button', { class: 'btn btn-primary btn-block', onclick: async () => { closeDialog(); await stamp(dateKey, memo.value, chosen); } }, 'あとから押す')]
+        : h('p', { class: 'reason' }, `${BACKFILL_DAYS}日より前の日には、あとから押せません`),
     ),
+    h('section', { class: 'option' },
+      h('h3', { class: 'option-rescue' }, h('span', { class: 'opt-icon', 'aria-hidden': 'true' }, capsuleSvg()), 'おくすりで守る'),
+      h('p', { class: 'muted small' }, '学習できなかった日を救済して、連続記録をつなぐ'),
+      rc.ok
+        ? h('button', { class: 'btn btn-rescue btn-block', onclick: async () => { closeDialog(); await rescue(dateKey); } },
+            `おくすりを使う（残り ${n}個 → ${n - 1}個）`)
+        : h('p', { class: 'reason' }, rc.reason),
+    ),
+    h('div', { class: 'btn-row' }, h('button', { class: 'btn', onclick: closeDialog }, 'キャンセル')),
   );
 }
 
@@ -642,6 +860,7 @@ async function exportBackup() {
     exportedAt: new Date().toISOString(),
     profiles: state.profiles,
     stamps: await db.listAllStamps(),
+    itemEvents: await db.listAllItemEvents(),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -662,20 +881,21 @@ async function importBackup(file) {
     await confirmDialog({ title: '読み込めませんでした', message: err instanceof SyntaxError ? 'JSON ファイルではありません' : err.message, alertOnly: true });
     return;
   }
-  const plan = planImport(state.profiles, await db.listAllStamps(), incoming);
-  if (!plan.profiles.length && !plan.stamps.length) {
+  const plan = planImport(state.profiles, await db.listAllStamps(), incoming, await db.listAllItemEvents());
+  if (!plan.profiles.length && !plan.stamps.length && !plan.itemEvents.length) {
     await confirmDialog({ title: '追加するデータはありません', message: 'バックアップの内容はすべて登録済みです。', alertOnly: true });
     return;
   }
   const ok = await confirmDialog({
     title: 'バックアップから復元しますか？',
-    message: `使う人 ${plan.profiles.length} 人、スタンプ ${plan.stamps.length} 日分を追加します。同じ日のスタンプがすでにある場合は、今のデータを残します。`,
+    message: `使う人 ${plan.profiles.length} 人、スタンプ ${plan.stamps.length} 日分、おくすりの記録 ${plan.itemEvents.length} 件を追加します。同じ日のスタンプがすでにある場合は、今のデータを残します。`,
     okLabel: '復元する',
   });
   if (!ok) return;
   await db.importData({
     profiles: plan.profiles.map((p, i) => ({ ...p, createdAt: new Date(Date.now() + i).toISOString() })),
     stamps: plan.stamps,
+    itemEvents: plan.itemEvents,
   });
   await loadProfiles();
   await loadStamps();

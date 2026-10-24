@@ -23,9 +23,11 @@ test('addDays は月・年をまたぐ', () => {
   assert.equal(addDays('2026-03-01', -1), '2026-02-28');
 });
 
-test('canStamp は未来日を拒否し過去日を許可する', () => {
+test('canStamp は今日と過去3日以内だけ許可する', () => {
   assert.ok(canStamp('2026-10-18', '2026-10-18'));
-  assert.ok(canStamp('2025-01-01', '2026-10-18'));
+  assert.ok(canStamp('2026-10-15', '2026-10-18'));
+  assert.ok(!canStamp('2026-10-14', '2026-10-18'));
+  assert.ok(!canStamp('2025-01-01', '2026-10-18'));
   assert.ok(!canStamp('2026-10-19', '2026-10-18'));
 });
 
@@ -90,6 +92,7 @@ test('parseBackup はスタンプのデザインを引き継ぐ', () => {
 test('parseBackup は不正なファイルを拒否する', () => {
   assert.throws(() => parseBackup({ app: 'other' }));
   assert.throws(() => parseBackup(backup({ version: 99 })));
+  assert.throws(() => parseBackup(backup({ itemEvents: [{ id: 'e1', profileId: 'p1', type: 'steal', date: '2026-10-18', at: '2026-10-18T00:00:00Z' }] })));
   assert.throws(() => parseBackup(backup({ stamps: [{ profileId: 'unknown', date: '2026-10-18', stampedAt: '2026-10-18T00:00:00Z' }] })));
   assert.throws(() => parseBackup(backup({ stamps: [{ profileId: 'p1', date: '2026-02-30', stampedAt: '2026-10-18T00:00:00Z' }] })));
 });
@@ -128,4 +131,71 @@ test('streakMessage は日数に応じて変わる', async () => {
   assert.match(streakMessage(3), /3日坊主/);
   assert.match(streakMessage(10), /1週間/);
   assert.match(streakMessage(30), /1か月/);
+});
+
+// ---- おくすり ----
+import {
+  itemCount, milestonesCrossed, daysToNextItem, rescueCheck, rescueCandidate, ITEM_MAX,
+} from '../js/domain.js';
+
+const stampsOf = (spec) => new Map(Object.entries(spec).map(([date, kind]) => [date, { date, kind }]));
+
+test('itemCount は獲得−使用で、上限で頭打ち', () => {
+  assert.equal(itemCount([]), 0);
+  assert.equal(itemCount([{ type: 'grant' }, { type: 'grant' }, { type: 'use' }]), 1);
+  assert.equal(itemCount([{ type: 'grant' }, { type: 'grant' }, { type: 'grant' }]), ITEM_MAX);
+  assert.equal(itemCount([{ type: 'use' }]), 0);
+});
+
+test('milestonesCrossed は 5 の倍数の通過を返す', () => {
+  assert.deepEqual(milestonesCrossed(4, 5), [5]);
+  assert.deepEqual(milestonesCrossed(5, 6), []);
+  assert.deepEqual(milestonesCrossed(3, 11), [5, 10]);
+  assert.deepEqual(milestonesCrossed(0, 4), []);
+});
+
+test('daysToNextItem', () => {
+  assert.equal(daysToNextItem(0), 5);
+  assert.equal(daysToNextItem(3), 2);
+  assert.equal(daysToNextItem(5), 5);
+});
+
+test('rescueCheck: 昨日だけ空いていれば使える', () => {
+  const st = stampsOf({ '2026-10-22': 'study' });
+  assert.ok(rescueCheck('2026-10-23', '2026-10-24', st, 1).ok);
+});
+
+test('rescueCheck: 1日の空きを挟んで後ろに学習があれば使える（翌々日まで）', () => {
+  const st = stampsOf({ '2026-10-21': 'study', '2026-10-23': 'study' });
+  assert.ok(rescueCheck('2026-10-22', '2026-10-24', st, 1).ok);
+});
+
+test('rescueCheck: 期限切れ・2日空き・連続使用・在庫なしは使えない', () => {
+  const today = '2026-10-24';
+  assert.match(rescueCheck('2026-10-21', today, stampsOf({ '2026-10-20': 'study', '2026-10-22': 'study' }), 1).reason, /期限/);
+  assert.match(rescueCheck('2026-10-22', today, stampsOf({ '2026-10-21': 'study' }), 1).reason, /2日以上/);
+  assert.match(rescueCheck('2026-10-23', today, stampsOf({ '2026-10-22': 'rescue', '2026-10-21': 'study' }), 1).reason, /2日続けて/);
+  assert.match(rescueCheck('2026-10-23', today, stampsOf({}), 1).reason, /前の日/);
+  assert.match(rescueCheck('2026-10-23', today, stampsOf({ '2026-10-22': 'study' }), 0).reason, /持っていません/);
+  assert.ok(!rescueCheck('2026-10-24', today, stampsOf({ '2026-10-23': 'study' }), 1).ok);
+});
+
+test('rescueCandidate は新しい日を優先し、なければ null', () => {
+  assert.equal(rescueCandidate('2026-10-24', stampsOf({ '2026-10-22': 'study' }), 1), '2026-10-23');
+  assert.equal(rescueCandidate('2026-10-24', stampsOf({ '2026-10-23': 'study' }), 1), null);
+  assert.equal(rescueCandidate('2026-10-24', stampsOf({ '2026-10-22': 'study' }), 0), null);
+});
+
+test('parseBackup は v1 も読め、v2 のアイテムを引き継ぐ', () => {
+  const v1 = parseBackup(backup({ version: 1 }));
+  assert.deepEqual(v1.itemEvents, []);
+  assert.equal(v1.stamps[0].kind, 'study');
+  const v2 = parseBackup(backup({
+    stamps: [{ profileId: 'p1', date: '2026-10-18', stampedAt: '2026-10-18T00:00:00Z', kind: 'rescue' }],
+    itemEvents: [{ id: 'e1', profileId: 'p1', type: 'grant', date: '2026-10-17', at: '2026-10-17T00:00:00Z', milestone: 5 }],
+  }));
+  assert.equal(v2.stamps[0].kind, 'rescue');
+  assert.equal(v2.itemEvents.length, 1);
+  const plan = planImport([], [], v2, [{ id: 'e1' }]);
+  assert.equal(plan.itemEvents.length, 0);
 });
